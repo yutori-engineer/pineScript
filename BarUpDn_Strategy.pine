@@ -1,0 +1,34 @@
+//@version=6
+strategy("BarUpDn Strategy", overlay=true, default_qty_type = strategy.fixed, default_qty_value = 100,initial_capital=350000)
+
+// トレード開始日
+startDate = timestamp("2024-05-01T00:00:00")
+// startDate = timestamp("2020-05-01T00:00:00")
+
+// 最大日中損失制限
+maxIdLossPcnt = input.float(1, "Max intraday loss (%)")
+strategy.risk.max_intraday_loss(maxIdLossPcnt, strategy.percent_of_equity)
+
+// 利益幅の％（例：10％で利確）
+takeProfitPcnt = input.float(10, "Take profit (%)")
+
+// トレーリングストップ幅（％）
+trailStopPcnt = input.float(3, "Trailing Stop (%)")
+trailOffsetPcnt = input.float(1, "Trailing Offset (%)")
+
+// 価格を％で換算
+takeProfitPts = close * takeProfitPcnt / 100
+trailStopPts = close * trailStopPcnt / 100
+trailOffsetPts = close * trailOffsetPcnt / 100
+
+// 条件を満たすバーのみエントリーを許可
+canTrade = time >= startDate
+
+if (canTrade and close > open and open > close[1])
+    strategy.entry("BarUp", strategy.long)
+
+if (canTrade and close < open and open < close[1])
+    strategy.entry("BarDn", strategy.short)
+
+strategy.exit("Exit Long", from_entry="BarUp", profit=takeProfitPts, trail_points=trailStopPts, trail_offset=trailOffsetPts)
+strategy.exit("Exit Short", from_entry="BarDn", profit=takeProfitPts, trail_points=trailStopPts, trail_offset=trailOffsetPts)
