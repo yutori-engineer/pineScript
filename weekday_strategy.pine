@@ -1,0 +1,20 @@
+//@version=6
+strategy('月曜9時エントリー・15時エグジット（正確版）', overlay = true, default_qty_type = strategy.fixed, default_qty_value = 100)
+
+// 条件 1時間足限定
+isFriday = dayofweek == dayofweek.friday
+isMonday = dayofweek == dayofweek.monday
+isEntryBar = isFriday and hour == 15 // ← 8:00〜9:00のバーの終わりでエントリー予約
+isExitBar = isMonday and hour == 14 // ← 14:00〜15:00のバー終値でクローズ（=15時）
+
+// エントリー：次のバー（9時）の始値で注文
+if isEntryBar
+    strategy.entry('Long', strategy.long)
+
+// エグジット：14時バーの終値（=15時）で決済
+if isExitBar
+    strategy.close('Long')
+
+// 可視化
+plotshape(isEntryBar, title = 'Entry予約', location = location.belowbar, color = color.green, style = shape.triangleup, size = size.small)
+plotshape(isExitBar, title = 'Exit', location = location.abovebar, color = color.red, style = shape.triangledown, size = size.small)
