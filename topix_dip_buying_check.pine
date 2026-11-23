@@ -1,0 +1,128 @@
+//@version=6
+// 1306（TOPIX）の「コア＋押し目の買い増し」を、長い期間で確かめる（2026-11-23、kabuSystem research/sim_features/step35 の C と同じ決まり）。
+// TradingView の中で見るだけ（データを書き出して使わない。TradingView の規約: データは表示のためだけ）。
+//
+// 決まり（step35 と同じ、2026-11-23 に固定）:
+//   持つ割合はその日の引けで決め、次の営業日の寄付きから持つ（寄付きで売り買い）。
+//   C : コア 0.7 を常に持ち、60日の高値（終値）からの下げが −5%・−10%・−15% になった日に 0.1 ずつ買い増す（合計 0.3）。
+//       高値から −2% より上に戻った日の引けで押し目の分を全部売ると決め、次の寄付きで売る。
+//   C+: コア 1.0（1 を超える分は信用）＋同じ押し目 0.3。
+//   比べる相手: H（常に 1.0）・H70（常に 0.7、残りは現金で利息 0）・一定の割合（C+ の平均の割合を表から入れて比べる）。
+//   費用: 割合を変えた分に 0.05%。信用の金利: 1 を超える分に 年 2.8%（暦の日数）。
+//   分配金: TOPIX（指数）は配当を含まないので「分配金の近似（年%）」に 2.0 程度を入れる。配当で調整した 1306 なら 0。
+// 近似: 持つ割合は毎日その割合に合わせ直す形で計算する（step35 は割合が変わったときだけ売り買い。差は小さい）。税は含まない。
+//
+// 使い方: TSE:1306（2001-07 上場）か TSE:TOPIX の日足に付ける。開始日・終了日を変えて、期間ごとに表を読む。
+//   読む期間（結果を見る前に固定）: 2001-07〜2012-12（IT バブルの後・リーマン）、2013-01〜2018-06（アベノミクス・日銀の買い入れ）、
+//   2018-07〜2022-04、2022-05〜（step35 と同じ区切り）。
+//   見ること: 各期間で C が H70 を上回るか。C+ が「一定の割合」（C+ の平均の割合を入れる）を上回るか。
+indicator("1306 押し目の買い増し（C）の確かめ", overlay = false, precision = 1)
+
+startDate = input.time(timestamp("2001-07-13T00:00:00"), "開始日")
+endDate   = input.time(timestamp("2099-12-31T00:00:00"), "終了日")
+core      = input.float(0.7, "C のコアの割合", step = 0.1)
+coreLev   = input.float(1.0, "C+ のコアの割合（1 を超えると信用）", step = 0.1)
+sat       = input.float(0.3, "押し目の割合（3段の合計）", step = 0.1)
+lv1       = input.float(5.0, "押し目1: 60日の高値から −%")
+lv2       = input.float(10.0, "押し目2: −%")
+lv3       = input.float(15.0, "押し目3: −%")
+resetPct  = input.float(2.0, "押し目を売る: 高値から −% より上に戻る")
+ddLen     = input.int(60, "高値の日数")
+costPct   = input.float(0.05, "売り買いの費用（%）")
+ratePct   = input.float(2.8, "信用の金利（年%）")
+divPct    = input.float(0.0, "分配金の近似（年%、TOPIX 指数なら 2.0 程度）")
+constW    = input.float(1.06, "比べる: 一定の割合（C+ の平均の割合を入れる）", step = 0.01)
+tblPos    = input.string("右上", "表の位置", options = ["右上", "左上", "右下", "左下"])
+
+if not timeframe.isdaily
+    runtime.error("日足のチャートで使ってください")
+
+inRange = time >= startDate and time <= endDate
+dd = close / ta.highest(close, ddLen) - 1
+
+var float held = 0.0
+var array<float> eq   = array.from(1.0, 1.0, 1.0, 1.0, 1.0)
+var array<float> wPos = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<float> wTgt = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<float> peak = array.from(1.0, 1.0, 1.0, 1.0, 1.0)
+var array<float> mdd  = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<float> sr   = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<float> sr2  = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<float> sexp = array.from(0.0, 0.0, 0.0, 0.0, 0.0)
+var array<int>   ntr  = array.from(0, 0, 0, 0, 0)
+var array<string> names = array.from("H ホールド", "H70 7割＋現金", "C コア＋押し目", "C+ コア1.0＋押し目（信用）", "一定の割合")
+var int nDays = 0
+var int t0 = 0
+var int t1 = 0
+var bool started = false
+
+if inRange
+    if started
+        days = (time - time[1]) / 86400000.0
+        rOn = open / close[1] - 1
+        rIn = close / open - 1
+        for i = 0 to 4
+            e0 = array.get(eq, i)
+            wp = array.get(wPos, i)
+            wt = array.get(wTgt, i)
+            // 前の日から持っている分の夜の間の値動きと、信用の金利
+            e = e0 * (1 + wp * rOn) * (1 - math.max(wp - 1, 0) * ratePct / 100 * days / 365)
+            // 寄付きで割合を変える（費用）
+            if math.abs(wt - wp) > 1e-9
+                e := e * (1 - math.abs(wt - wp) * costPct / 100)
+                array.set(ntr, i, array.get(ntr, i) + 1)
+            // 日中の値動きと分配金の近似
+            e := e * (1 + wt * rIn + wt * divPct / 100 / 245)
+            r = e / e0 - 1
+            array.set(eq, i, e)
+            array.set(wPos, i, wt)
+            array.set(sr, i, array.get(sr, i) + r)
+            array.set(sr2, i, array.get(sr2, i) + r * r)
+            array.set(sexp, i, array.get(sexp, i) + wt)
+            array.set(peak, i, math.max(array.get(peak, i), e))
+            array.set(mdd, i, math.min(array.get(mdd, i), e / array.get(peak, i) - 1))
+        nDays += 1
+        t1 := time
+    else
+        started := true
+        t0 := time
+        t1 := time
+    // 引けで次の日の割合を決める
+    if dd > -resetPct / 100
+        held := 0.0
+    else
+        hits = (dd <= -lv1 / 100 ? 1 : 0) + (dd <= -lv2 / 100 ? 1 : 0) + (dd <= -lv3 / 100 ? 1 : 0)
+        held := math.max(held, sat / 3 * hits)
+    array.set(wTgt, 0, 1.0)
+    array.set(wTgt, 1, 0.7)
+    array.set(wTgt, 2, core + held)
+    array.set(wTgt, 3, coreLev + held)
+    array.set(wTgt, 4, constW)
+
+plot((array.get(eq, 0) - 1) * 100, "H ホールド", color = color.gray, linewidth = 2)
+plot((array.get(eq, 1) - 1) * 100, "H70 7割＋現金", color = color.silver)
+plot((array.get(eq, 2) - 1) * 100, "C コア＋押し目", color = color.teal, linewidth = 2)
+plot((array.get(eq, 3) - 1) * 100, "C+ コア1.0＋押し目（信用）", color = color.orange, linewidth = 2)
+plot((array.get(eq, 4) - 1) * 100, "一定の割合", color = color.purple)
+plot(inRange ? held * 100 : na, "押し目の割合（%）", color = color.new(color.blue, 60), style = plot.style_area, display = display.pane)
+
+if barstate.islast and nDays > 1
+    pos = tblPos == "右上" ? position.top_right : tblPos == "左上" ? position.top_left : tblPos == "右下" ? position.bottom_right : position.bottom_left
+    tb = table.new(pos, 7, 7, bgcolor = color.new(color.black, 30), border_width = 1)
+    hdr = array.from("形", "合計", "年率", "一番の下げ", "シャープ", "平均の割合", "回数")
+    for c = 0 to 6
+        table.cell(tb, c, 0, array.get(hdr, c), text_color = color.white, text_size = size.small)
+    yrs = (t1 - t0) / (365.25 * 86400000.0)
+    for i = 0 to 4
+        e = array.get(eq, i)
+        m = array.get(sr, i) / nDays
+        sd = math.sqrt(math.max(array.get(sr2, i) / nDays - m * m, 0))
+        cagr = yrs > 0 ? math.pow(e, 1 / yrs) - 1 : na
+        table.cell(tb, 0, i + 1, array.get(names, i), text_color = color.white, text_size = size.small, text_halign = text.align_left)
+        table.cell(tb, 1, i + 1, str.tostring((e - 1) * 100, "#,##0.0") + "%", text_color = color.white, text_size = size.small)
+        table.cell(tb, 2, i + 1, str.tostring(cagr * 100, "0.00") + "%", text_color = color.white, text_size = size.small)
+        table.cell(tb, 3, i + 1, str.tostring(array.get(mdd, i) * 100, "0.0") + "%", text_color = color.white, text_size = size.small)
+        table.cell(tb, 4, i + 1, sd > 0 ? str.tostring(m / sd * math.sqrt(245), "0.00") : "-", text_color = color.white, text_size = size.small)
+        table.cell(tb, 5, i + 1, str.tostring(array.get(sexp, i) / nDays, "0.00"), text_color = color.white, text_size = size.small)
+        table.cell(tb, 6, i + 1, str.tostring(array.get(ntr, i)), text_color = color.white, text_size = size.small)
+    table.cell(tb, 0, 6, str.format("{0} 〜 {1}（{2}日）", str.format_time(t0, "yyyy-MM-dd"), str.format_time(t1, "yyyy-MM-dd"), nDays), text_color = color.white, text_size = size.small, text_halign = text.align_left)
